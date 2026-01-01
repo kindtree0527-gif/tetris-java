@@ -15,6 +15,7 @@ import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
 import java.io.IOException;
 import java.net.URL;
+import java.util.List;
 import java.util.Random;
 import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
@@ -59,6 +60,9 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
     JButton startButton;
     JButton replayButton;
 
+    // ★追加：Finish画面にランキングボタン
+    JButton rankingButton;
+
     boolean showReady = false;
     boolean showGo = false;
     long messageStartTime = 0L;
@@ -67,6 +71,15 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
     long playStartTimeMs = 0L;
     int remainingSeconds = 180;
     boolean finished = false;
+
+    // ★追加：ランキング画面切替
+    boolean showRankingScreen = false;
+    List<Integer> topScores = java.util.List.of();
+
+    // ★追加：新記録判定（Finish時のみ）
+    boolean newRecord = false;
+    int previousBestScore = 0;
+    int lastSavedScore = 0;
 
     // ★BGM用（プレイ中ループ）
     private Clip bgmClip;
@@ -99,6 +112,24 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
         this.replayButton.setVisible(false);
         this.add(this.replayButton);
 
+        // ★追加：Finish画面でReplayの上に置く
+        this.rankingButton = new JButton("ScoreRanking");
+        this.rankingButton.setBounds(330, 530, 120, 30);
+        this.rankingButton.addActionListener((e) -> {
+            // ランキング画面へ切り替え
+            this.showRankingScreen = true;
+            this.topScores = ScoreManager.getTopScores(10);
+
+            // ボタン表示：ランキング画面ではReplayだけ（右下）
+            this.rankingButton.setVisible(false);
+            this.replayButton.setVisible(true);
+
+            this.repaint();
+            this.requestFocusInWindow();
+        });
+        this.rankingButton.setVisible(false);
+        this.add(this.rankingButton);
+
         this.nextPiece();
     }
 
@@ -118,9 +149,17 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
         this.remainingSeconds = GAME_DURATION_SEC;
         this.playStartTimeMs = 0L;
 
+        // ★ランキング関連初期化
+        this.showRankingScreen = false;
+        this.topScores = java.util.List.of();
+        this.newRecord = false;
+        this.previousBestScore = 0;
+        this.lastSavedScore = 0;
+
         this.timer.setDelay(this.normalDelay);
         this.startButton.setVisible(false);
         this.replayButton.setVisible(false);
+        this.rankingButton.setVisible(false);
 
         this.spawnPiece();
 
@@ -272,7 +311,10 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
             this.playGameOverSound();
             this.running = false;
             this.timer.stop();
+
+            // GAMEOVERではランキングボタンは出さない（要件：Finish時）
             this.replayButton.setVisible(true);
+            this.rankingButton.setVisible(false);
         }
     }
 
@@ -302,6 +344,9 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
     }
 
     public void actionPerformed(ActionEvent e) {
+        // ★ランキング画面中はゲーム更新しない
+        if (this.showRankingScreen) return;
+
         long now = System.currentTimeMillis();
 
         if (this.showReady) {
@@ -336,7 +381,7 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
                 long elapsedSec = (now - this.playStartTimeMs) / 1000L;
                 this.remainingSeconds = (int) Math.max(0L, GAME_DURATION_SEC - elapsedSec);
                 if (this.remainingSeconds <= 0) {
-                    this.finishGame();
+                    this.finishGame(); // ★ここでスコア保存
                     this.repaint();
                     return;
                 }
@@ -367,31 +412,75 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
         // ★FINISHでBGM停止
         stopBgm();
 
+        // ★スコアを記録（Finish時のみ）
+        this.previousBestScore = ScoreManager.getBestScore();
+        this.lastSavedScore = this.score;
+        ScoreManager.addScore(this.score);
+        this.topScores = ScoreManager.getTopScores(10);
+        this.newRecord = this.score > this.previousBestScore;
+
         this.playFinishSound();
         this.timer.stop();
+
+        // ★Finish画面：ReplayとScoreRankingボタンを表示
         this.replayButton.setVisible(true);
+        this.rankingButton.setVisible(true);
     }
 
     public void keyPressed(KeyEvent e) {
-        if (!this.showReady && !this.showGo && !this.finished && !this.gameOver) {
-            int key = e.getKeyCode();
+        int key = e.getKeyCode();
 
-            // ★変更：SでHOLD（paused）になったらBGM停止、解除で再開
+        // =========================
+        // START画面で S でも開始
+        // =========================
+        if (this.startButton.isVisible() && !this.running && !this.showReady && !this.showGo
+                && !this.gameOver && !this.finished && !this.showRankingScreen) {
             if (key == KeyEvent.VK_S) {
+                this.playStartSound();
+                this.startGame();
+            }
+            return;
+        }
+
+        // =========================
+        // Replay画面で R でも開始（GameOver / Finish / Ranking）
+        // =========================
+        if ((this.gameOver || this.finished || this.showRankingScreen) && this.replayButton.isVisible()) {
+            if (key == KeyEvent.VK_R) {
+                this.playStartSound();
+                this.startGame();
+            }
+            if (this.showRankingScreen) return;
+        }
+
+        // ランキング画面中は（上のR以外）キー操作無効
+        if (this.showRankingScreen) return;
+
+        // ここから先はプレイ中
+        if (!this.showReady && !this.showGo && !this.finished && !this.gameOver) {
+
+            // ★変更：HでHOLD（paused）になったらBGM停止、解除で再開
+            if (key == KeyEvent.VK_H) {
                 this.paused = !this.paused;
 
                 if (this.paused) {
-                    // HOLD中はBGMを消す（停止）
                     stopBgm();
                 } else {
-                    // HOLD解除でプレイ中ならBGM再開
-                    if (this.running) {
-                        startBgmLoop();
-                    }
+                    if (this.running) startBgmLoop();
                 }
 
                 this.repaint();
-            } else if (this.running && !this.paused) {
+                return;
+            }
+
+            // Rでリスタート（プレイ中もOK）
+            if (key == KeyEvent.VK_R) {
+                this.playStartSound();
+                this.startGame();
+                return;
+            }
+
+            if (this.running && !this.paused) {
                 if (key == KeyEvent.VK_LEFT) {
                     if (this.currentPiece.canMove(this.gameBoard, this.currentPiece.x - 1, this.currentPiece.y)) {
                         --this.currentPiece.x;
@@ -432,6 +521,12 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
 
+        // ランキング画面
+        if (this.showRankingScreen) {
+            drawRankingScreen(g);
+            return;
+        }
+
         if (this.showReady) {
             this.drawCenteredText(g, "Ready?", Color.WHITE);
             return;
@@ -467,7 +562,7 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
             }
         }
 
-        // ===== ゴーストミノ（復活）=====
+        // ゴーストミノ
         if (this.running && !this.paused && !this.gameOver && !this.finished && this.currentPiece != null) {
             int ghostY = this.currentPiece.getGhostY(this.gameBoard);
             if (ghostY != this.currentPiece.y) {
@@ -485,7 +580,7 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
             }
         }
 
-        // 現在のミノ
+        // 現在ミノ
         if (!this.gameOver && this.currentPiece != null) {
             for (int r = 0; r < this.currentPiece.shape.length; ++r) {
                 for (int c = 0; c < this.currentPiece.shape[0].length; ++c) {
@@ -500,7 +595,7 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
             }
         }
 
-        // ===== NEXT表示（復活）=====
+        // NEXT表示
         g.setColor(Color.WHITE);
         g.drawString("NEXT:", 330, 30);
 
@@ -519,12 +614,18 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
             }
         }
 
-        g.setColor(Color.WHITE);
+        // 新記録のときだけ Score を赤（Finish後のみ）
+        if (this.finished && this.newRecord) {
+            g.setColor(Color.RED);
+        } else {
+            g.setColor(Color.WHITE);
+        }
         g.drawString("Score: " + this.score, 330, 160);
+
+        g.setColor(Color.WHITE);
         g.drawString("Level: " + this.level, 330, 180);
         g.drawString("Time: " + this.formatTime(this.remainingSeconds), 330, 200);
 
-        // GAME OVERは赤
         if (this.gameOver) {
             this.drawCenteredText(g, "GAME OVER", Color.RED);
         }
@@ -534,6 +635,36 @@ public class TetrisPanel extends JPanel implements ActionListener, KeyListener {
         if (this.paused) {
             this.drawCenteredText(g, "HOLD", Color.WHITE);
         }
+    }
+
+    private void drawRankingScreen(Graphics g) {
+        Graphics2D g2 = (Graphics2D) g;
+        g2.setColor(Color.BLACK);
+        g2.fillRect(0, 0, getWidth(), getHeight());
+
+        g2.setColor(Color.WHITE);
+        g2.setFont(new Font("Arial", Font.BOLD, 28));
+        g2.drawString("SCORE RANKING (TOP 10)", 40, 80);
+
+        List<Integer> scores = (this.topScores == null || this.topScores.isEmpty())
+                ? ScoreManager.getTopScores(10)
+                : this.topScores;
+
+        g2.setFont(new Font("Arial", Font.PLAIN, 22));
+        int startY = 130;
+        int lineH = 30;
+
+        for (int i = 0; i < Math.min(10, scores.size()); i++) {
+            int s = scores.get(i);
+            boolean highlight = this.newRecord && (s == this.lastSavedScore) && i == 0;
+
+            g2.setColor(highlight ? Color.RED : Color.WHITE);
+            g2.drawString(String.format("%2d. %d", i + 1, s), 140, startY + i * lineH);
+        }
+
+        g2.setColor(Color.LIGHT_GRAY);
+        g2.setFont(new Font("Arial", Font.PLAIN, 14));
+        g2.drawString("Replayで最初から開始（RキーでもOK）", 150, 610);
     }
 
     private void drawBlockCell(Graphics g, int gridX, int gridY, Color baseColor, boolean ghost) {
